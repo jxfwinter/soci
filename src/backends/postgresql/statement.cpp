@@ -15,12 +15,155 @@
 #include <cstring>
 #include <ctime>
 #include <sstream>
-
+#include <chrono>
+#include <boost/fiber/all.hpp>
+//#include <iostream>
 using namespace soci;
 using namespace soci::details;
 
 namespace // unnamed
 {
+
+PGresult* Fiber_Wait(PGconn *conn)
+{
+    while (PQisBusy(conn))
+    {
+        boost::this_fiber::sleep_for(std::chrono::milliseconds(2));
+        if (0 == PQconsumeInput(conn))
+        {
+            return nullptr;
+        }
+    }
+    PGresult* result = nullptr;
+    PGresult* tmp_result = nullptr;
+    while ((tmp_result = PQgetResult(conn)) != nullptr)
+    {
+        if (result != nullptr)
+        {
+            PQclear(result);
+            result = nullptr;
+        }
+        result = tmp_result;
+    }
+
+    return result;
+}
+
+/*
+PGresult* Fiber_Wait(PGconn *conn)
+{
+    std::cout << "-------Fiber_Wait start" << std::endl;
+    int fd = PQsocket(conn);
+    fd_set rfds;
+    struct timeval tv;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+
+    PGresult* result = nullptr;
+    PGresult* tmp_result = nullptr;
+    bool result_ready = false;
+
+    while (true) {
+        int retVal = select(fd + 1, &rfds, nullptr, nullptr, &tv);
+
+        if (retVal > 0) {
+            retVal = PQconsumeInput(conn);
+            if (0 == retVal) {
+                std::cout << "-------" << PQerrorMessage(conn) << std::endl;
+            }
+
+            if (!PQisBusy(conn)) {
+                std::cout << "-------PQisBusy false" << std::endl;
+                result_ready = true;
+                break;
+            }
+        } else if (retVal < 0) {
+            std::cout << "-------retVal<0" << std::endl;
+            break;
+        } else {
+            std::cout << "-------retVal==0" << std::endl;
+            break;
+        }
+    }
+
+    if(!result_ready)
+    {
+        return result;
+    }
+
+    while ((tmp_result = PQgetResult(conn)) != nullptr)
+    {
+        if (result != nullptr)
+        {
+            PQclear(result);
+            result = nullptr;
+        }
+        result = tmp_result;
+    }
+
+    std::cout << "-------Fiber_Wait stop" << std::endl;
+    return result;
+}
+*/
+
+PGresult *Fiber_PQprepare(PGconn *conn,
+                          const char *stmtName,
+                          const char *query,
+                          int nParams,
+                          const Oid *paramTypes)
+{
+    int retVal;
+    retVal = PQsendPrepare(conn, stmtName, query, nParams, paramTypes);
+    if(retVal == 0)
+        return nullptr;
+
+    return Fiber_Wait(conn);
+}
+
+PGresult *Fiber_PQexecPrepared(PGconn *conn,
+                               const char *stmtName,
+                               int nParams,
+                               const char *const *paramValues,
+                               const int *paramLengths,
+                               const int *paramFormats,
+                               int resultFormat)
+{
+    int retVal;
+    retVal = PQsendQueryPrepared(conn, stmtName, nParams, paramValues, paramLengths, paramFormats, resultFormat);
+    if(retVal == 0)
+        return nullptr;
+
+    return Fiber_Wait(conn);
+}
+
+PGresult *Fiber_PQexecParams(PGconn *conn,
+                             const char *command,
+                             int nParams,
+                             const Oid *paramTypes,
+                             const char *const *paramValues,
+                             const int *paramLengths,
+                             const int *paramFormats,
+                             int resultFormat)
+{
+    int retVal;
+    retVal = PQsendQueryParams(conn, command, nParams, paramTypes, paramValues, paramLengths, paramFormats, resultFormat);
+    if(retVal == 0)
+        return nullptr;
+
+    return Fiber_Wait(conn);
+}
+
+PGresult *Fiber_PQexec(PGconn *conn, const char *query)
+{
+    int retVal;
+    retVal = PQsendQuery(conn, query);
+    if(retVal == 0)
+        return nullptr;
+
+    return Fiber_Wait(conn);
+}
 
 // used only with asynchronous operations in single-row mode
 #ifndef SOCI_POSTGRESQL_NOSINGLEROWMODE
@@ -234,7 +377,7 @@ void postgresql_statement_backend::prepare(std::string const & query,
             // default multi-row query execution
 
             postgresql_result result(session_,
-                PQprepare(session_.conn_, statementName.c_str(),
+                Fiber_PQprepare(session_.conn_, statementName.c_str(),
                     query_.c_str(), static_cast<int>(names_.size()), NULL));
             result.check_for_errors("Cannot prepare statement.");
         }
@@ -374,7 +517,7 @@ postgresql_statement_backend::execute(int number)
                     {
                         // default multi-row execution
 
-                        result_.reset(PQexecPrepared(session_.conn_,
+                        result_.reset(Fiber_PQexecPrepared(session_.conn_,
                                 statementName_.c_str(),
                                 static_cast<int>(paramValues.size()),
                                 &paramValues[0], NULL, NULL, 0));
@@ -409,7 +552,7 @@ postgresql_statement_backend::execute(int number)
                     {
                         // default multi-row execution
 
-                        result_.reset(PQexecParams(session_.conn_, query_.c_str(),
+                        result_.reset(Fiber_PQexecParams(session_.conn_, query_.c_str(),
                                 static_cast<int>(paramValues.size()),
                                 NULL, &paramValues[0], NULL, NULL, 0));
                     }
@@ -469,7 +612,7 @@ postgresql_statement_backend::execute(int number)
                 {
                     // default multi-row execution
 
-                    result_.reset(PQexecPrepared(session_.conn_,
+                    result_.reset(Fiber_PQexecPrepared(session_.conn_,
                             statementName_.c_str(), 0, NULL, NULL, NULL, 0));
                 }
             }
@@ -497,7 +640,7 @@ postgresql_statement_backend::execute(int number)
                 {
                     // default multi-row execution
 
-                    result_.reset(PQexec(session_.conn_, query_.c_str()));
+                    result_.reset(Fiber_PQexec(session_.conn_, query_.c_str()));
                 }
             }
         }

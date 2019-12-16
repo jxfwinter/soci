@@ -16,18 +16,113 @@
 #include <cstring>
 #include <ctime>
 #include <sstream>
-
+#include <chrono>
+#include <boost/fiber/all.hpp>
+//#include <iostream>
 using namespace soci;
 using namespace soci::details;
 
 namespace // unnamed
 {
+    PGresult* Fiber_Wait(PGconn *conn)
+{
+    while (PQisBusy(conn))
+    {
+        boost::this_fiber::sleep_for(std::chrono::milliseconds(2));
+        if (0 == PQconsumeInput(conn))
+        {
+            return nullptr;
+        }
+    }
+    PGresult* result = nullptr;
+    PGresult* tmp_result = nullptr;
+    while ((tmp_result = PQgetResult(conn)) != nullptr)
+    {
+        if (result != nullptr)
+        {
+            PQclear(result);
+            result = nullptr;
+        }
+        result = tmp_result;
+    }
+
+    return result;
+}
+
+/*
+PGresult* Fiber_Wait(PGconn *conn)
+{
+    std::cout << "-------Fiber_Wait start" << std::endl;
+    int fd = PQsocket(conn);
+    fd_set rfds;
+    struct timeval tv;
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+
+    PGresult* result = nullptr;
+    PGresult* tmp_result = nullptr;
+    bool result_ready = false;
+
+    while (true) {
+        int retVal = select(fd + 1, &rfds, nullptr, nullptr, &tv);
+
+        if (retVal > 0) {
+            retVal = PQconsumeInput(conn);
+            if (0 == retVal) {
+                std::cout << "-------" << PQerrorMessage(conn) << std::endl;
+            }
+
+            if (!PQisBusy(conn)) {
+                std::cout << "-------PQisBusy false" << std::endl;
+                result_ready = true;
+                break;
+            }
+        } else if (retVal < 0) {
+            std::cout << "-------retVal<0" << std::endl;
+            break;
+        } else {
+            std::cout << "-------retVal==0" << std::endl;
+            break;
+        }
+    }
+
+    if(!result_ready)
+    {
+        return result;
+    }
+
+    while ((tmp_result = PQgetResult(conn)) != nullptr)
+    {
+        if (result != nullptr)
+        {
+            PQclear(result);
+            result = nullptr;
+        }
+        result = tmp_result;
+    }
+
+    std::cout << "-------Fiber_Wait stop" << std::endl;
+    return result;
+}
+*/
+
+PGresult *Fiber_PQexec(PGconn *conn, const char *query)
+{
+    int retVal;
+    retVal = PQsendQuery(conn, query);
+    if(retVal == 0)
+        return nullptr;
+
+   return Fiber_Wait(conn);
+}
 
 // helper function for hardcoded queries
 void hard_exec(postgresql_session_backend & session_backend,
     PGconn * conn, char const * query, char const * errMsg)
 {
-    postgresql_result(session_backend, PQexec(conn, query)).check_for_errors(errMsg);
+    postgresql_result(session_backend, Fiber_PQexec(conn, query)).check_for_errors(errMsg);
 }
 
 } // namespace unnamed
